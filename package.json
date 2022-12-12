@@ -12,6 +12,7 @@
   "dependencies": {
     "@shopify/shopify-api": "^5.2.0",
     "dotenv": "^16.0.3",
-    "express": "^4.18.2"
+    "express": "^4.18.2",
+    "shopify-api-node": "^3.11.3"
   }
 }

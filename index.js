@@ -1,85 +1,123 @@
 require('dotenv').config();
 
-const http = require('http');
-const express = require('express');
-const app = express();
-const {Shopify} = require("@shopify/shopify-api");
-const {ApiVersion} = require("@shopify/shopify-api");
+const Shopify = require("shopify-api-node");
+const {query} = require("express");
 
-const {  API_KEY, API_SECRET_KEY, SCOPES, SHOP, HOST, HOST_SCHEME } = process.env;
+const { SHOP, ACCESS_TOKEN } = process.env;
+const Weekly_Collection = 429612368187;
 
-Shopify.Context.initialize({
-    API_KEY,
-    API_SECRET_KEY,
-    SCOPES: [SCOPES],
-    HOST_NAME: HOST.replace(/https?:\/\//, ""),
-    HOST_SCHEME,
-    IS_EMBEDDED_APP: false,
-    API_VERSION: ApiVersion.October22 // all supported versions are available, as well as "unstable" and "unversioned"
-})
-
-const ACTIVE_SHOPIFY_SHOPS = {};
-
-app.get('/', async (http_request, http_response) => {
-    if(ACTIVE_SHOPIFY_SHOPS[SHOP] === undefined) {
-        http_response.redirect('/auth/shopify');
-    } else {
-        http_response.send('<html><body><p>You have successfully authenticated and are back at your app.</p><p><a href="/products">View Products</a></p></body></html>');
-    }
+const shopify = new Shopify({
+    shopName: SHOP,
+    accessToken: ACCESS_TOKEN
 });
 
-app.get('/auth/shopify', async (http_request, http_response) => {
-    let authorizedRoute = await Shopify.Auth.beginAuth(
-        http_request,
-        http_response,
-        SHOP,
-        '/auth/shopify/callback',
-        false,
-    );
-    return http_response.redirect(authorizedRoute);
-});
+const WEEKLY_PRICE = "15.00";
+const FOREVER_PRICE = "18.00";
 
-app.get('/auth/shopify/callback', async (http_request, http_response) => {
-    try {
-        const client_session = await Shopify.Auth.validateAuthCallback(
-            http_request,
-            http_response,
-            http_request.query);
-        ACTIVE_SHOPIFY_SHOPS[SHOP] = client_session.scope;
-        console.log(client_session.accessToken);
-    } catch (eek) {
-        console.error(eek);
-        http_response.send('<html><body><p>${JSON.stringify(eek)}</p></body></html>')
-    }
-    return http_response.redirect('/auth/shopify/success');
-});
+shopify.smartCollection.get(Weekly_Collection) // Get the weekly collection
+    .then((collection) => {
+        let oldTag = collection.rules[0].condition; // Get current collection tag
 
-app.get('/auth/shopify/success', async  (http_request, http_response) => {
-    http_response.send('<html><body><p>You have successfully authenticated and are back at your app.</p></body></html>');
-});
+        let weekNbr = oldTag.charAt(oldTag.length - 1); // Get week number on the tag
+        weekNbr = String.fromCharCode(weekNbr.charCodeAt(0) + 1); // increment week number
 
-app.get('/products', async (http_request, http_response) => {
-    const client_session = await Shopify.Utils?.loadCurrentSession(http_request, http_response);
-    console.log('client_session: ' + JSON.stringify(client_session));
+        let newTag = "W" + weekNbr;
 
-    const client = new Shopify.Clients.Rest(client_session.shop, client_session.accessToken);
+        let updatedRule = {
+            column: 'tag',
+            relation: 'equals',
+            condition: newTag
+        };
 
-    const products = await client.get({
-        path: 'products'
+        let queryOld = `{ products(first: 5, query: "tag:` + oldTag + `") {
+                            edges {
+                              node {
+                                id
+                              }
+                            }
+                          }
+                        }`;
+
+        let queryNew = `{ products(first: 5, query: "tag:` + newTag + `") {
+                            edges {
+                              node {
+                                id
+                              }
+                            }
+                          }
+                        }`;
+
+
+        shopify.graphql( queryOld ) // Get the list of old weekly products, add forever to their tags and update their price
+            .then((result) => {
+                let products_data = result.products.edges;
+
+                products_data.forEach(node => {
+                    let id = node.node.id;
+                    id = id.replace("gid://shopify/Product/", "");
+                    shopify.product.get(id)
+                        .then((product) => {
+                            product.tags = oldTag + ', forever';
+                            product.variants.forEach(variant => {
+                               variant.price = FOREVER_PRICE;
+                            });
+                            shopify.product.update(id, product)
+                                .then((result) => {
+                                    //console.log(result);
+                                })
+                                .catch((error) => {
+                                    console.error('Error updating product with id "' + id + '":', error);
+                                });
+                            //console.log(product);
+                        })
+                        .catch((error) => {
+                            console.error('Error getting product with id "' + id + '":', error);
+                        });
+                });
+            })
+            .catch((error) => {
+                console.error('Error retrieving products with tag "' + oldTag + '":', error);
+            });
+
+        shopify.graphql( queryNew ) // Get the list of new weekly products, make them active and update their price
+            .then((result) => {
+                let products_data = result.products.edges;
+
+                products_data.forEach(node => {
+                    let id = node.node.id;
+                    id = id.replace("gid://shopify/Product/", "");
+                    shopify.product.get(id)
+                        .then((product) => {
+                            //product.status = "active";
+                            product.variants.forEach(variant => {
+                                variant.price = WEEKLY_PRICE;
+                            });
+                            shopify.product.update(id, product)
+                                .then((result) => {
+                                    console.log(result);
+                                })
+                                .catch((error) => {
+                                    console.error('Error updating product with id "' + id + '":', error);
+                                });
+                            //console.log(product);
+                        })
+                        .catch((error) => {
+                            console.error('Error getting product with id "' + id + '":', error);
+                        });
+                });
+            })
+            .catch((error) => {
+                console.error('Error retrieving products with tag "' + oldTag + '":', error);
+            });
+
+        shopify.smartCollection.update(Weekly_Collection, { rules: [updatedRule] }) //Update the weekly collection to show the next week products
+            .then((collection) => {
+                //console.log('Successfully updated collection tags:', collection.rules[0]);
+            })
+            .catch((error) => {
+                console.error('Error updating collection tags:', error);
+            });
+    })
+    .catch(err => {
+        console.error(err);
     });
-    console.log('Products: ' + JSON.stringify(products));
-
-    let product_names_formatted = '';
-    for(let i =0; i < products.body.products.length; i++) {
-        product_names_formatted += '<p>' + products.body.products[i].title + '</p>';
-    }
-
-    http_response.send(`<html><body><p>Products List</p>
-          ${product_names_formatted}
-          </body></html>`);
-
-});
-
-const httpServer = http.createServer(app);
-
-httpServer.listen(3000, () => console.log('Your Slack-OAuth app is listening on port 3000.'));
